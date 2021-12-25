@@ -20,9 +20,11 @@ from plyfile import PlyData, PlyElement
 from PIL import Image
 import multiprocess as mp
 from itertools import product
+from thop import profile, clever_format
 
 cudnn.benchmark = True
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 parser = argparse.ArgumentParser(description='Predict depth, filter, and fuse. May be different from the original implementation')
 parser.add_argument('--model', default='mvsnet', help='select model')
@@ -107,19 +109,48 @@ def save_depth():
         model = MVSNet(refine=args.refine)
     elif args.model == "mvsnet_denoise":
         model = MVSNet_Denoise(refine=args.refine)
-    model = nn.DataParallel(model)
-    model.cuda()
-
+    # model = nn.DataParallel(model)
+   
     # load checkpoint file specified by args.loadckpt
     print("loading model {}".format(args.loadckpt))
-    state_dict = torch.load(args.loadckpt)
-    model.load_state_dict(state_dict['model'])
+    state_dict = torch.load(args.loadckpt)['model']
+
+    # delete state_dict's keys "module."
+    from collections import OrderedDict
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        name = k[7:]
+        new_state_dict[name] = v
+    
+    model.load_state_dict(new_state_dict)
+    model.cuda()
     model.eval()
 
     with torch.no_grad():
         for batch_idx, sample in enumerate(TestImgLoader):
             sample_cuda = tocuda(sample)
+            if batch_idx == 0:
+                time_start = time.time()
             outputs = model(sample_cuda["imgs"], sample_cuda["proj_matrices"], sample_cuda["depth_values"])
+
+             # output running time and the complexity of network
+            if batch_idx == 99:
+                time_end = time.time()
+                print("running time for 100 batches is {}s".format(time_end-time_start))
+                sys.exit()
+            if batch_idx == 0:
+                sample_cuda["imgs"] = sample_cuda["imgs"].cuda()
+                sample_cuda["proj_matrices"] = sample_cuda["proj_matrices"].cuda()
+                sample_cuda["depth_values"] = sample_cuda["depth_values"].cuda()
+                model.cuda()
+
+                macs, params = profile(model, inputs=(sample_cuda["imgs"], sample_cuda["proj_matrices"], sample_cuda["depth_values"], ))
+                macs, params = clever_format([macs, params], "%.3f")
+                print("**************************************************")
+                print(macs, params)
+                print("**************************************************")
+
+            """
             outputs = tensor2numpy(outputs)
             del sample_cuda
             print('Iter {}/{}'.format(batch_idx, len(TestImgLoader)))
@@ -136,6 +167,7 @@ def save_depth():
                 save_pfm(depth_filename, depth_est)
                 # save confidence maps
                 save_pfm(confidence_filename, photometric_confidence) 
+            """
 
 # project the reference point cloud into the source view, then project back
 def reproject_with_depth(depth_ref, intrinsics_ref, extrinsics_ref, depth_src, intrinsics_src, extrinsics_src):
@@ -318,10 +350,16 @@ if __name__ == '__main__':
     # args.outdir = '*/outdir' # Set the path to save the results
     # args.batch_size = *** # Set the appropriate value according to the GPU memory
 
+    args.testpath = "/home/ubuntu/hjw/DEMVSNet/dtu_testing"
+    args.testlist = '/home/ubuntu/hjw/Code_DEMVSNet/CasMVSNet-Ours/lists/dtu/test.txt'
+    args.loadckpt = '/home/ubuntu/hjw/Code_DEMVSNet/model/MVSNet+Ours.ckpt' # Select the model to be tested
+    args.outdir = '/home/ubuntu/hjw/DEMVSNet/output' # Set the path to save the results
+    args.batch_size = 1 # Set the appropriate value according to the GPU memory 
+
     print("argv:", sys.argv[1:])
     print_args(args)
     # step1. save all the depth maps and the masks in outputs directory
-    # save_depth()
+    save_depth()
     with open(args.testlist) as f:
         scans = f.readlines()
         scans = [line.rstrip() for line in scans]
